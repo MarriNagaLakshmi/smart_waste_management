@@ -34,14 +34,13 @@ os.makedirs(UPLOAD, exist_ok=True)
 
 app = Flask(__name__)
 
-# Trigger database table initialization automatically when Render boots the app
-def run_initialization():
+# AUTOMATED DATABASE INITIALIZATION TRIGGER FOR RENDER
+@app.before_request
+def auto_initialize_database():
     try:
         init_db()
     except Exception as e:
-        print(f"Database initialization alert: {e}")
-
-run_initialization()
+        app.logger.error(f"Auto-init database error: {e}")
 
 app.secret_key = os.environ.get(
     "SECRET_KEY",
@@ -397,5 +396,5 @@ def logout():
 
 
 # --------------------------------------------------
-# RUN LOCAL SERVER CONFIGURATION
+# RUN SERVER CONFIGURATION FOR DEPLOYMENT
 # --------------------------------------------------
