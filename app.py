@@ -27,7 +27,7 @@ from werkzeug.utils import secure_filename
 
 BASE = os.path.dirname(os.path.abspath(__file__))
 
-DB = os.path.join(BASE, "waste.db")
+DB = os.path.join(BASE, "waste_prod.db")
 UPLOAD = os.path.join(BASE, "uploads")
 
 os.makedirs(UPLOAD, exist_ok=True)
