@@ -1,4 +1,3 @@
-
 import os
 import sqlite3
 import uuid
@@ -34,6 +33,15 @@ UPLOAD = os.path.join(BASE, "uploads")
 os.makedirs(UPLOAD, exist_ok=True)
 
 app = Flask(__name__)
+
+# Trigger database table initialization automatically when Render boots the app
+def run_initialization():
+    try:
+        init_db()
+    except Exception as e:
+        print(f"Database initialization alert: {e}")
+
+run_initialization()
 
 app.secret_key = os.environ.get(
     "SECRET_KEY",
@@ -336,19 +344,13 @@ def register():
 
             except sqlite3.IntegrityError:
 
-                flash(
-                    "This email is already registered.",
-                    "error"
-                )
+                flash("Email already registered.", "error")
 
-    return render_template(
-        "auth.html",
-        mode="register"
-    )
+    return render_template("register.html")
 
 
 # --------------------------------------------------
-# LOGIN
+# LOGIN / LOGOUT
 # --------------------------------------------------
 
 @app.route("/login", methods=["GET", "POST"])
@@ -356,10 +358,7 @@ def login():
 
     if request.method == "POST":
 
-        email = request.form.get(
-            "email", ""
-        ).strip().lower()
-
+        email = request.form.get("email", "").strip().lower()
         password = request.form.get("password", "")
 
         with db() as connection:
@@ -369,560 +368,34 @@ def login():
                 (email,)
             ).fetchone()
 
-        if user and check_password_hash(
-            user["password"],
-            password
-        ):
+        if user and check_password_hash(user["password"], password):
 
-            session.clear()
+            session["uid"] = user["id"]
+            session["name"] = user["name"]
+            session["role"] = user["role"]
 
-            session.update(
-                uid=user["id"],
-                name=user["name"],
-                role=user["role"]
-            )
+            nxt = request.args.get("next")
 
-            next_page = request.args.get("next")
+            if nxt and nxt.startswith("/"):
+                return redirect(nxt)
 
-            if next_page and next_page.startswith("/") and not next_page.startswith("//"):
-                return redirect(next_page)
+            if user["role"] == "admin":
+                return redirect(url_for("admin_dashboard"))
 
-            return redirect(url_for("dashboard"))
+            return redirect(url_for("resident_dashboard"))
 
-        flash(
-            "Email or password is incorrect.",
-            "error"
-        )
+        flash("Invalid email or password.", "error")
 
-    return render_template(
-        "auth.html",
-        mode="login"
-    )
+    return render_template("login.html")
 
-
-# --------------------------------------------------
-# LOGOUT
-# --------------------------------------------------
 
 @app.route("/logout")
 def logout():
-
     session.clear()
-
+    flash("You have logged out.", "success")
     return redirect(url_for("home"))
 
 
 # --------------------------------------------------
-# RESIDENT DASHBOARD
+# RUN LOCAL SERVER CONFIGURATION
 # --------------------------------------------------
-
-@app.route("/dashboard")
-@login_required
-def dashboard():
-
-    # Corrected status filter
-    status = request.args.get("status", "")
-
-    with db() as connection:
-
-        query = """
-            SELECT *
-            FROM complaints
-            WHERE user_id = ?
-        """
-
-        arguments = [session["uid"]]
-
-        if status:
-
-            query += " AND status = ?"
-            arguments.append(status)
-
-        query += " ORDER BY created DESC"
-
-        complaints = connection.execute(
-            query,
-            arguments
-        ).fetchall()
-
-        updates = connection.execute(
-            """
-            SELECT updates.*, complaints.complaint_no
-            FROM updates
-            JOIN complaints
-            ON complaints.id = updates.complaint_id
-            WHERE complaints.user_id = ?
-            ORDER BY updates.created DESC
-            LIMIT 12
-            """,
-            (session["uid"],)
-        ).fetchall()
-
-    return render_template(
-        "dashboard.html",
-        complaints=complaints,
-        updates=updates,
-        status=status
-    )
-
-
-# --------------------------------------------------
-# CREATE COMPLAINT
-# --------------------------------------------------
-
-@app.route("/complaint/new", methods=["GET", "POST"])
-@login_required
-def new_complaint():
-
-    if request.method == "POST":
-
-        category = request.form.get(
-            "category", ""
-        ).strip()
-
-        description = request.form.get(
-            "description", ""
-        ).strip()
-
-        location = request.form.get(
-            "location", ""
-        ).strip()
-
-        latitude = request.form.get("latitude", "")
-        longitude = request.form.get("longitude", "")
-
-        image_name = None
-
-        uploaded = request.files.get("image")
-
-        if not category or not description or not location:
-
-            flash(
-                "Category, description and location are required.",
-                "error"
-            )
-
-        else:
-
-            if (
-                uploaded
-                and uploaded.filename
-                and allowed(uploaded.filename)
-            ):
-
-                safe_name = secure_filename(uploaded.filename)
-
-                image_name = (
-                    uuid.uuid4().hex
-                    + "_"
-                    + safe_name
-                )
-
-                uploaded.save(
-                    os.path.join(UPLOAD, image_name)
-                )
-
-            priority = (
-                "High"
-                if any(
-                    word in description.lower()
-                    for word in [
-                        "overflow",
-                        "hazard",
-                        "medical",
-                        "blocked drain"
-                    ]
-                )
-                else "Normal"
-            )
-
-            reference = complaint_no()
-
-            with db() as connection:
-
-                cursor = connection.execute(
-                    """
-                    INSERT INTO complaints
-                    (
-                        complaint_no,
-                        user_id,
-                        category,
-                        description,
-                        location,
-                        latitude,
-                        longitude,
-                        image,
-                        status,
-                        priority,
-                        created,
-                        updated
-                    )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        reference,
-                        session["uid"],
-                        category,
-                        description,
-                        location,
-                        latitude,
-                        longitude,
-                        image_name,
-                        "Pending",
-                        priority,
-                        now(),
-                        now()
-                    )
-                )
-
-                complaint_id = cursor.lastrowid
-
-            add_update(
-                complaint_id,
-                "Pending",
-                "Complaint received. The municipal team will review it."
-            )
-
-            flash(
-                "Complaint submitted. Reference: " + reference,
-                "success"
-            )
-
-            return redirect(
-                url_for("track", no=reference)
-            )
-
-    return render_template("new_complaint.html")
-
-
-# --------------------------------------------------
-# TRACK COMPLAINT
-# --------------------------------------------------
-
-@app.route("/track/<no>")
-@login_required
-def track(no):
-
-    with db() as connection:
-
-        complaint = connection.execute(
-            """
-            SELECT complaints.*, users.name AS reporter
-            FROM complaints
-            JOIN users ON users.id = complaints.user_id
-            WHERE complaint_no = ?
-            """,
-            (no,)
-        ).fetchone()
-
-        if not complaint:
-            abort(404)
-
-        if (
-            complaint["user_id"] != session["uid"]
-            and session.get("role") != "admin"
-        ):
-            abort(403)
-
-        updates = connection.execute(
-            """
-            SELECT *
-            FROM updates
-            WHERE complaint_id = ?
-            ORDER BY created DESC
-            """,
-            (complaint["id"],)
-        ).fetchall()
-
-    return render_template(
-        "track.html",
-        complaint=complaint,
-        updates=updates
-    )
-
-
-# --------------------------------------------------
-# ADMIN DASHBOARD
-# --------------------------------------------------
-
-@app.route("/admin")
-@login_required
-@admin_required
-def admin():
-
-    status = request.args.get("status", "")
-
-    query = """
-        SELECT complaints.*, users.name AS reporter, users.email
-        FROM complaints
-        JOIN users ON users.id = complaints.user_id
-    """
-
-    arguments = []
-
-    if status:
-
-        query += " WHERE complaints.status = ?"
-        arguments.append(status)
-
-    query += " ORDER BY complaints.created DESC"
-
-    with db() as connection:
-
-        complaints = connection.execute(
-            query,
-            arguments
-        ).fetchall()
-
-    return render_template(
-        "admin.html",
-        complaints=complaints,
-        status=status
-    )
-
-
-# --------------------------------------------------
-# ADMIN UPDATE COMPLAINT
-# --------------------------------------------------
-
-@app.route("/admin/update/<int:cid>", methods=["POST"])
-@login_required
-@admin_required
-def update_complaint(cid):
-
-    status = request.form.get("status")
-
-    worker = request.form.get(
-        "worker", ""
-    ).strip()
-
-    message = request.form.get(
-        "message", ""
-    ).strip()
-
-    valid_statuses = {
-        "Pending",
-        "Assigned",
-        "In Progress",
-        "Completed",
-        "Recycled"
-    }
-
-    if status not in valid_statuses:
-        abort(400)
-
-    with db() as connection:
-
-        complaint = connection.execute(
-            "SELECT * FROM complaints WHERE id = ?",
-            (cid,)
-        ).fetchone()
-
-        if not complaint:
-            abort(404)
-
-        connection.execute(
-            """
-            UPDATE complaints
-            SET assigned_worker = ?, updated = ?
-            WHERE id = ?
-            """,
-            (
-                worker,
-                now(),
-                cid
-            )
-        )
-
-    if not message:
-
-        if status == "Completed":
-
-            message = "Collection completed successfully."
-
-        elif status == "Recycled":
-
-            message = "Material marked as recycled."
-
-        else:
-
-            message = f"Complaint status changed to {status}."
-
-            if worker:
-                message += f" Assigned worker: {worker}."
-
-    add_update(
-        cid,
-        status,
-        message
-    )
-
-    flash(
-        "Complaint updated. Resident can see this update in their dashboard.",
-        "success"
-    )
-
-    return redirect(url_for("admin"))
-
-
-# --------------------------------------------------
-# ADMIN REPORTS
-# --------------------------------------------------
-
-@app.route("/reports")
-@login_required
-@admin_required
-def reports():
-
-    with db() as connection:
-
-        rows = connection.execute(
-            """
-            SELECT status, COUNT(*) AS count
-            FROM complaints
-            GROUP BY status
-            """
-        ).fetchall()
-
-        areas = connection.execute(
-            """
-            SELECT location, COUNT(*) AS count
-            FROM complaints
-            GROUP BY location
-            ORDER BY count DESC
-            """
-        ).fetchall()
-
-    return render_template(
-        "reports.html",
-        rows=rows,
-        areas=areas
-    )
-
-
-# --------------------------------------------------
-# RESIDENT FEEDBACK
-# --------------------------------------------------
-
-@app.route("/feedback/<no>", methods=["POST"])
-@login_required
-def feedback(no):
-
-    try:
-
-        rating = int(
-            request.form.get("rating", 5)
-        )
-
-    except ValueError:
-
-        rating = 5
-
-    rating = max(1, min(5, rating))
-
-    message = request.form.get(
-        "message", ""
-    ).strip()
-
-    with db() as connection:
-
-        complaint = connection.execute(
-            """
-            SELECT *
-            FROM complaints
-            WHERE complaint_no = ?
-            AND user_id = ?
-            """,
-            (
-                no,
-                session["uid"]
-            )
-        ).fetchone()
-
-        if not complaint:
-            abort(404)
-
-        if complaint["status"] not in (
-            "Completed",
-            "Recycled"
-        ):
-
-            flash(
-                "Feedback is available after resolution.",
-                "error"
-            )
-
-        else:
-
-            connection.execute(
-                """
-                INSERT INTO feedback
-                (complaint_id, user_id, rating, message, created)
-                VALUES (?, ?, ?, ?, ?)
-                """,
-                (
-                    complaint["id"],
-                    session["uid"],
-                    rating,
-                    message,
-                    now()
-                )
-            )
-
-            flash(
-                "Thank you for your feedback.",
-                "success"
-            )
-
-    return redirect(
-        url_for("track", no=no)
-    )
-
-
-# --------------------------------------------------
-# UPLOADED COMPLAINT IMAGE
-# --------------------------------------------------
-
-@app.route("/uploads/<path:filename>")
-@login_required
-def uploaded_file(filename):
-
-    return send_from_directory(
-        app.config["UPLOAD_FOLDER"],
-        filename
-    )
-
-
-# --------------------------------------------------
-# ERROR HANDLERS
-# --------------------------------------------------
-
-@app.errorhandler(403)
-def forbidden(error):
-
-    return render_template(
-        "error.html",
-        code=403,
-        message="You do not have permission to view this page."
-    ), 403
-
-
-@app.errorhandler(404)
-def not_found(error):
-
-    return render_template(
-        "error.html",
-        code=404,
-        message="Page or complaint not found."
-    ), 404
-
-
-# --------------------------------------------------
-# RUN APPLICATION
-# --------------------------------------------------
-
-if __name__ == "__main__":
-    import os
-    port = int(os.environ.get("PORT", 10000))
-    app.run(host="0.0.0.0", port=port)
-
